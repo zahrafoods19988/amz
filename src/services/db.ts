@@ -8,6 +8,7 @@ import {
   DashboardMetrics,
   DateFilterRange,
 } from '../types';
+import { cloudSync } from './cloudSyncService';
 
 const STORAGE_KEYS = {
   ORDERS: 'aspt_orders_v1',
@@ -234,9 +235,41 @@ const SEED_ORDERS: Order[] = [
 ];
 
 class DatabaseService {
+  private currentUserId: string | null = null;
+
+  public setUserId(userId: string | null) {
+    this.currentUserId = userId;
+    cloudSync.setUserId(userId);
+    if (userId) {
+      const userKey = this.getKey(STORAGE_KEYS.ORDERS);
+      if (!localStorage.getItem(userKey)) {
+        // If brand new user with no scoped data, check if we need to seed or leave clean
+        // We initialize empty arrays so user has completely isolated data
+        this.setStorage(STORAGE_KEYS.ORDERS, []);
+        this.setStorage(STORAGE_KEYS.PRODUCTS, []);
+        this.setStorage(STORAGE_KEYS.TRANSACTIONS, []);
+        this.setStorage(STORAGE_KEYS.HANDOVERS, []);
+        this.setStorage(STORAGE_KEYS.COST_HISTORY, []);
+        this.setStorage(STORAGE_KEYS.SCANNED_LABELS, []);
+      }
+    }
+  }
+
+  public getUserId(): string | null {
+    return this.currentUserId;
+  }
+
+  private getKey(baseKey: string): string {
+    if (this.currentUserId) {
+      return `${baseKey}_${this.currentUserId}`;
+    }
+    return baseKey;
+  }
+
   private getStorage<T>(key: string, defaultVal: T): T {
     try {
-      const data = localStorage.getItem(key);
+      const scopedKey = this.getKey(key);
+      const data = localStorage.getItem(scopedKey);
       if (!data) return defaultVal;
       return JSON.parse(data);
     } catch {
@@ -246,7 +279,8 @@ class DatabaseService {
 
   private setStorage<T>(key: string, val: T): void {
     try {
-      localStorage.setItem(key, JSON.stringify(val));
+      const scopedKey = this.getKey(key);
+      localStorage.setItem(scopedKey, JSON.stringify(val));
     } catch (e) {
       console.error('Storage error:', e);
     }
@@ -257,12 +291,13 @@ class DatabaseService {
   }
 
   public init(reset: boolean = false) {
-    if (reset || !localStorage.getItem(STORAGE_KEYS.ORDERS)) {
-      this.setStorage(STORAGE_KEYS.ORDERS, SEED_ORDERS);
-      this.setStorage(STORAGE_KEYS.PRODUCTS, SEED_PRODUCTS);
-      this.setStorage(STORAGE_KEYS.TRANSACTIONS, SEED_TRANSACTIONS);
-      this.setStorage(STORAGE_KEYS.HANDOVERS, SEED_HANDOVERS);
-      this.setStorage(STORAGE_KEYS.COST_HISTORY, [
+    const key = this.getKey(STORAGE_KEYS.ORDERS);
+    if (reset || !localStorage.getItem(key)) {
+      this.setStorage(STORAGE_KEYS.ORDERS, this.currentUserId ? [] : SEED_ORDERS);
+      this.setStorage(STORAGE_KEYS.PRODUCTS, this.currentUserId ? [] : SEED_PRODUCTS);
+      this.setStorage(STORAGE_KEYS.TRANSACTIONS, this.currentUserId ? [] : SEED_TRANSACTIONS);
+      this.setStorage(STORAGE_KEYS.HANDOVERS, this.currentUserId ? [] : SEED_HANDOVERS);
+      this.setStorage(STORAGE_KEYS.COST_HISTORY, this.currentUserId ? [] : [
         {
           id: 'ch-1',
           product_id: 'prod-horlicks-1kg',
@@ -271,7 +306,7 @@ class DatabaseService {
           created_at: new Date().toISOString(),
         },
       ]);
-      this.setStorage(STORAGE_KEYS.SCANNED_LABELS, [
+      this.setStorage(STORAGE_KEYS.SCANNED_LABELS, this.currentUserId ? [] : [
         {
           id: 'lbl-1',
           order_id: '402-2652435-6373954',
@@ -302,6 +337,9 @@ class DatabaseService {
   }
 
   public saveOrder(order: Order): void {
+    if (this.currentUserId) {
+      order.user_id = this.currentUserId;
+    }
     const orders = this.getOrders();
     const index = orders.findIndex(o => o.id === order.id || o.order_id === order.order_id);
     if (index >= 0) {
@@ -310,32 +348,88 @@ class DatabaseService {
       orders.unshift({ ...order, updated_at: new Date().toISOString() });
     }
     this.setStorage(STORAGE_KEYS.ORDERS, orders);
+
+    if (this.currentUserId) {
+      cloudSync.enqueue({
+        user_id: this.currentUserId,
+        table_name: 'orders',
+        action: 'UPSERT',
+        payload: order,
+      });
+    }
   }
 
   public deleteOrder(id: string): void {
     const orders = this.getOrders().filter(o => o.id !== id && o.order_id !== id);
     this.setStorage(STORAGE_KEYS.ORDERS, orders);
+
+    if (this.currentUserId) {
+      cloudSync.enqueue({
+        user_id: this.currentUserId,
+        table_name: 'orders',
+        action: 'DELETE',
+        payload: { id },
+      });
+    }
   }
 
   public deleteOrdersBulk(ids: string[]): number {
     if (!ids || ids.length === 0) return 0;
     const idSet = new Set(ids);
     const prevOrders = this.getOrders();
+    const toDelete = prevOrders.filter(o => idSet.has(o.id) || idSet.has(o.order_id));
     const remaining = prevOrders.filter(o => !idSet.has(o.id) && !idSet.has(o.order_id));
     const deletedCount = prevOrders.length - remaining.length;
     this.setStorage(STORAGE_KEYS.ORDERS, remaining);
+
+    if (this.currentUserId) {
+      toDelete.forEach(o => {
+        cloudSync.enqueue({
+          user_id: this.currentUserId!,
+          table_name: 'orders',
+          action: 'DELETE',
+          payload: { id: o.id },
+        });
+      });
+    }
+
     return deletedCount;
   }
 
   public clearAllOrders(): void {
+    const prevOrders = this.getOrders();
     this.setStorage(STORAGE_KEYS.ORDERS, []);
+
+    if (this.currentUserId) {
+      prevOrders.forEach(o => {
+        cloudSync.enqueue({
+          user_id: this.currentUserId!,
+          table_name: 'orders',
+          action: 'DELETE',
+          payload: { id: o.id },
+        });
+      });
+    }
   }
 
   public deleteUnmatchedOrders(): number {
     const prev = this.getOrders();
+    const toDelete = prev.filter(o => !(o.transaction_status === 'MATCHED' && o.handover_status === 'MATCHED'));
     const remaining = prev.filter(o => o.transaction_status === 'MATCHED' && o.handover_status === 'MATCHED');
     const count = prev.length - remaining.length;
     this.setStorage(STORAGE_KEYS.ORDERS, remaining);
+
+    if (this.currentUserId) {
+      toDelete.forEach(o => {
+        cloudSync.enqueue({
+          user_id: this.currentUserId!,
+          table_name: 'orders',
+          action: 'DELETE',
+          payload: { id: o.id },
+        });
+      });
+    }
+
     return count;
   }
 
@@ -394,6 +488,7 @@ class DatabaseService {
 
     const newProduct: ProductMaster = {
       id: `prod-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
+      user_id: this.currentUserId || undefined,
       product_name: data.product_name,
       asin: data.asin,
       sku: data.sku,
@@ -407,6 +502,15 @@ class DatabaseService {
     const products = this.getProducts();
     products.push(newProduct);
     this.setStorage(STORAGE_KEYS.PRODUCTS, products);
+
+    if (this.currentUserId) {
+      cloudSync.enqueue({
+        user_id: this.currentUserId,
+        table_name: 'products',
+        action: 'UPSERT',
+        payload: newProduct,
+      });
+    }
 
     if (data.purchase_cost !== undefined && data.purchase_cost > 0) {
       this.recordCostHistory(newProduct.id, data.purchase_cost);
@@ -425,9 +529,21 @@ class DatabaseService {
     product.current_purchase_cost = newCost;
     product.cost_effective_date = new Date().toISOString();
     product.updated_at = new Date().toISOString();
+    if (this.currentUserId) {
+      product.user_id = this.currentUserId;
+    }
 
     this.setStorage(STORAGE_KEYS.PRODUCTS, products);
     this.recordCostHistory(productId, newCost);
+
+    if (this.currentUserId) {
+      cloudSync.enqueue({
+        user_id: this.currentUserId,
+        table_name: 'products',
+        action: 'UPSERT',
+        payload: product,
+      });
+    }
 
     // Apply to pending orders or orders created after effective date without purchase cost
     this.applyCostToOrdersWithoutCost(productId, newCost);
@@ -439,23 +555,57 @@ class DatabaseService {
     const products = this.getProducts();
     const idx = products.findIndex(p => p.id === product.id);
     if (idx >= 0) {
+      if (this.currentUserId) {
+        product.user_id = this.currentUserId;
+      }
       products[idx] = { ...product, updated_at: new Date().toISOString() };
       this.setStorage(STORAGE_KEYS.PRODUCTS, products);
+
+      if (this.currentUserId) {
+        cloudSync.enqueue({
+          user_id: this.currentUserId,
+          table_name: 'products',
+          action: 'UPSERT',
+          payload: products[idx],
+        });
+      }
     }
   }
 
   public deleteProduct(id: string): void {
     const products = this.getProducts().filter(p => p.id !== id);
     this.setStorage(STORAGE_KEYS.PRODUCTS, products);
+
+    if (this.currentUserId) {
+      cloudSync.enqueue({
+        user_id: this.currentUserId,
+        table_name: 'products',
+        action: 'DELETE',
+        payload: { id },
+      });
+    }
   }
 
   public deleteProductsBulk(ids: string[]): number {
     if (!ids || ids.length === 0) return 0;
     const idSet = new Set(ids);
     const prev = this.getProducts();
+    const toDelete = prev.filter(p => idSet.has(p.id));
     const remaining = prev.filter(p => !idSet.has(p.id));
     const deletedCount = prev.length - remaining.length;
     this.setStorage(STORAGE_KEYS.PRODUCTS, remaining);
+
+    if (this.currentUserId) {
+      toDelete.forEach(p => {
+        cloudSync.enqueue({
+          user_id: this.currentUserId!,
+          table_name: 'products',
+          action: 'DELETE',
+          payload: { id: p.id },
+        });
+      });
+    }
+
     return deletedCount;
   }
 
@@ -463,19 +613,42 @@ class DatabaseService {
     const prev = this.getProducts();
     const count = prev.length;
     this.setStorage(STORAGE_KEYS.PRODUCTS, []);
+
+    if (this.currentUserId) {
+      prev.forEach(p => {
+        cloudSync.enqueue({
+          user_id: this.currentUserId!,
+          table_name: 'products',
+          action: 'DELETE',
+          payload: { id: p.id },
+        });
+      });
+    }
+
     return count;
   }
 
   public recordCostHistory(productId: string, cost: number): void {
     const history = this.getStorage<PurchaseCostHistory[]>(STORAGE_KEYS.COST_HISTORY, []);
-    history.push({
-      id: `ch-${Date.now()}`,
+    const entry: PurchaseCostHistory = {
+      id: `ch-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+      user_id: this.currentUserId || undefined,
       product_id: productId,
       purchase_cost: cost,
       effective_date: new Date().toISOString(),
       created_at: new Date().toISOString(),
-    });
+    };
+    history.push(entry);
     this.setStorage(STORAGE_KEYS.COST_HISTORY, history);
+
+    if (this.currentUserId) {
+      cloudSync.enqueue({
+        user_id: this.currentUserId,
+        table_name: 'purchase_cost_history',
+        action: 'UPSERT',
+        payload: entry,
+      });
+    }
   }
 
   public getCostHistory(productId: string): PurchaseCostHistory[] {
@@ -540,6 +713,17 @@ class DatabaseService {
     }
 
     if (toAdd.length > 0) {
+      if (this.currentUserId) {
+        toAdd.forEach(t => {
+          t.user_id = this.currentUserId!;
+          cloudSync.enqueue({
+            user_id: this.currentUserId!,
+            table_name: 'transactions',
+            action: 'UPSERT',
+            payload: t,
+          });
+        });
+      }
       this.setStorage(STORAGE_KEYS.TRANSACTIONS, [...existing, ...toAdd]);
       this.matchAllPending();
     }
@@ -569,6 +753,17 @@ class DatabaseService {
     }
 
     if (toAdd.length > 0) {
+      if (this.currentUserId) {
+        toAdd.forEach(h => {
+          h.user_id = this.currentUserId!;
+          cloudSync.enqueue({
+            user_id: this.currentUserId!,
+            table_name: 'handover_records',
+            action: 'UPSERT',
+            payload: h,
+          });
+        });
+      }
       this.setStorage(STORAGE_KEYS.HANDOVERS, [...existing, ...toAdd]);
       this.matchAllPending();
     }
@@ -842,10 +1037,11 @@ class DatabaseService {
     });
   }
 
-  // Export full DB as JSON
+  // Export full DB as JSON (Filtered strictly to active user)
   public exportDatabaseJSON(): string {
     const data = {
-      version: '1.0',
+      version: '2.0',
+      user_id: this.currentUserId || 'local_user',
       exported_at: new Date().toISOString(),
       orders: this.getOrders(),
       products: this.getProducts(),
@@ -857,21 +1053,167 @@ class DatabaseService {
     return JSON.stringify(data, null, 2);
   }
 
-  // Restore DB from JSON
+  // Restore DB from JSON (Imported strictly into active user's account)
   public importDatabaseJSON(jsonStr: string): boolean {
     try {
       const data = JSON.parse(jsonStr);
-      if (Array.isArray(data.orders)) this.setStorage(STORAGE_KEYS.ORDERS, data.orders);
-      if (Array.isArray(data.products)) this.setStorage(STORAGE_KEYS.PRODUCTS, data.products);
-      if (Array.isArray(data.transactions)) this.setStorage(STORAGE_KEYS.TRANSACTIONS, data.transactions);
-      if (Array.isArray(data.handovers)) this.setStorage(STORAGE_KEYS.HANDOVERS, data.handovers);
-      if (Array.isArray(data.scanned_labels)) this.setStorage(STORAGE_KEYS.SCANNED_LABELS, data.scanned_labels);
-      if (Array.isArray(data.cost_history)) this.setStorage(STORAGE_KEYS.COST_HISTORY, data.cost_history);
+      if (Array.isArray(data.orders)) {
+        data.orders.forEach((o: Order) => {
+          if (this.currentUserId) o.user_id = this.currentUserId;
+          this.saveOrder(o);
+        });
+      }
+      if (Array.isArray(data.products)) {
+        data.products.forEach((p: ProductMaster) => {
+          if (this.currentUserId) p.user_id = this.currentUserId;
+          this.updateProduct(p);
+        });
+      }
+      if (Array.isArray(data.transactions)) {
+        this.saveTransactions(data.transactions);
+      }
+      if (Array.isArray(data.handovers)) {
+        this.saveHandovers(data.handovers);
+      }
+      if (Array.isArray(data.scanned_labels)) {
+        this.setStorage(STORAGE_KEYS.SCANNED_LABELS, data.scanned_labels);
+      }
+      if (Array.isArray(data.cost_history)) {
+        data.cost_history.forEach((ch: PurchaseCostHistory) => {
+          if (this.currentUserId) ch.user_id = this.currentUserId;
+          this.recordCostHistory(ch.product_id, ch.purchase_cost);
+        });
+      }
       return true;
     } catch (e) {
       console.error('Failed to import database:', e);
       return false;
     }
+  }
+
+  // --- CLOUD SYNC & MULTI-DEVICE RECONCILIATION ---
+  public pullCloudUpdates(cloudData: {
+    orders?: Order[];
+    products?: ProductMaster[];
+    costHistory?: PurchaseCostHistory[];
+    transactions?: TransactionRecord[];
+    handovers?: HandoverRecord[];
+  }) {
+    if (!this.currentUserId) return;
+
+    if (cloudData.orders && Array.isArray(cloudData.orders)) {
+      const currentOrders = this.getOrders();
+      const orderMap = new Map<string, Order>();
+      // Put existing local
+      currentOrders.forEach(o => orderMap.set(o.id || o.order_id, o));
+      // Overwrite/insert with latest cloud records
+      cloudData.orders.forEach(o => orderMap.set(o.id || o.order_id, o));
+      this.setStorage(STORAGE_KEYS.ORDERS, Array.from(orderMap.values()));
+    }
+
+    if (cloudData.products && Array.isArray(cloudData.products)) {
+      const currentProducts = this.getProducts();
+      const prodMap = new Map<string, ProductMaster>();
+      currentProducts.forEach(p => prodMap.set(p.id, p));
+      cloudData.products.forEach(p => prodMap.set(p.id, p));
+      this.setStorage(STORAGE_KEYS.PRODUCTS, Array.from(prodMap.values()));
+    }
+
+    if (cloudData.costHistory && Array.isArray(cloudData.costHistory)) {
+      const current = this.getStorage<PurchaseCostHistory[]>(STORAGE_KEYS.COST_HISTORY, []);
+      const chMap = new Map<string, PurchaseCostHistory>();
+      current.forEach(c => chMap.set(c.id, c));
+      cloudData.costHistory.forEach(c => chMap.set(c.id, c));
+      this.setStorage(STORAGE_KEYS.COST_HISTORY, Array.from(chMap.values()));
+    }
+
+    if (cloudData.transactions && Array.isArray(cloudData.transactions)) {
+      const current = this.getTransactions();
+      const txMap = new Map<string, TransactionRecord>();
+      current.forEach(t => txMap.set(t.id || t.order_id, t));
+      cloudData.transactions.forEach(t => txMap.set(t.id || t.order_id, t));
+      this.setStorage(STORAGE_KEYS.TRANSACTIONS, Array.from(txMap.values()));
+    }
+
+    if (cloudData.handovers && Array.isArray(cloudData.handovers)) {
+      const current = this.getHandovers();
+      const hoMap = new Map<string, HandoverRecord>();
+      current.forEach(h => hoMap.set(h.id || h.tracking_id, h));
+      cloudData.handovers.forEach(h => hoMap.set(h.id || h.tracking_id, h));
+      this.setStorage(STORAGE_KEYS.HANDOVERS, Array.from(hoMap.values()));
+    }
+
+    this.matchAllPending();
+  }
+
+  // --- LOCAL STORAGE MIGRATION CHECK & EXECUTION ---
+  public hasLegacyLocalStorageData(): boolean {
+    if (!this.currentUserId) return false;
+    const migratedKey = `aspt_migrated_${this.currentUserId}`;
+    if (localStorage.getItem(migratedKey)) return false;
+
+    try {
+      const rawOrders = localStorage.getItem(STORAGE_KEYS.ORDERS);
+      if (!rawOrders) return false;
+      const orders = JSON.parse(rawOrders);
+      return Array.isArray(orders) && orders.length > 0;
+    } catch {
+      return false;
+    }
+  }
+
+  public migrateLegacyDataToUser(userId: string): { ordersCount: number; productsCount: number } {
+    try {
+      const rawOrders = localStorage.getItem(STORAGE_KEYS.ORDERS);
+      const rawProducts = localStorage.getItem(STORAGE_KEYS.PRODUCTS);
+      const rawTx = localStorage.getItem(STORAGE_KEYS.TRANSACTIONS);
+      const rawHo = localStorage.getItem(STORAGE_KEYS.HANDOVERS);
+      const rawCh = localStorage.getItem(STORAGE_KEYS.COST_HISTORY);
+
+      const legacyOrders: Order[] = rawOrders ? JSON.parse(rawOrders) : [];
+      const legacyProducts: ProductMaster[] = rawProducts ? JSON.parse(rawProducts) : [];
+      const legacyTx: TransactionRecord[] = rawTx ? JSON.parse(rawTx) : [];
+      const legacyHo: HandoverRecord[] = rawHo ? JSON.parse(rawHo) : [];
+      const legacyCh: PurchaseCostHistory[] = rawCh ? JSON.parse(rawCh) : [];
+
+      let ordersCount = 0;
+      let productsCount = 0;
+
+      // Migrate products
+      legacyProducts.forEach(p => {
+        p.user_id = userId;
+        this.updateProduct(p);
+        productsCount++;
+      });
+
+      // Migrate transactions & handovers
+      if (legacyTx.length > 0) this.saveTransactions(legacyTx);
+      if (legacyHo.length > 0) this.saveHandovers(legacyHo);
+
+      // Migrate orders
+      legacyOrders.forEach(o => {
+        o.user_id = userId;
+        this.saveOrder(o);
+        ordersCount++;
+      });
+
+      // Migrate cost history
+      legacyCh.forEach(ch => {
+        this.recordCostHistory(ch.product_id, ch.purchase_cost);
+      });
+
+      // Mark migrated so prompt does not reappear
+      localStorage.setItem(`aspt_migrated_${userId}`, 'true');
+
+      return { ordersCount, productsCount };
+    } catch (e) {
+      console.error('Migration error:', e);
+      return { ordersCount: 0, productsCount: 0 };
+    }
+  }
+
+  public dismissLegacyMigration(userId: string) {
+    localStorage.setItem(`aspt_migrated_${userId}`, 'dismissed');
   }
 }
 

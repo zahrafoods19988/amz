@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { db } from './services/db';
-import { Order, ProductMaster, DateFilterRange } from './types';
+import { authService } from './services/authService';
+import { cloudSync } from './services/cloudSyncService';
+import { Order, ProductMaster, DateFilterRange, AuthUser, SyncStatus } from './types';
 import { Navbar } from './components/Navbar';
 import { BottomNav, TabType } from './components/BottomNav';
 import { DashboardView } from './components/DashboardView';
@@ -13,12 +15,21 @@ import { ScannerModal } from './components/ScannerModal';
 import { OrderDetailModal } from './components/OrderDetailModal';
 import { ProductCostModal } from './components/ProductCostModal';
 import { UploadModal } from './components/UploadModal';
+import { AuthModal } from './components/AuthModal';
+import { MigrationModal } from './components/MigrationModal';
 
 export default function App() {
   const [currentTab, setCurrentTab] = useState<TabType>('dashboard');
   const [dateRange, setDateRange] = useState<DateFilterRange>('all');
   const [customStart, setCustomStart] = useState<string>('');
   const [customEnd, setCustomEnd] = useState<string>('');
+
+  // Authentication & Cloud Sync State
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(authService.getCurrentUser());
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>(cloudSync.getStatus());
+  const [lastSyncedTime, setLastSyncedTime] = useState<string | null>(cloudSync.getLastSyncedTime());
+  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [isMigrationModalOpen, setIsMigrationModalOpen] = useState(false);
 
   // Modals state
   const [isScannerOpen, setIsScannerOpen] = useState(false);
@@ -29,7 +40,7 @@ export default function App() {
   const [selectedProductForCost, setSelectedProductForCost] = useState<ProductMaster | null>(null);
 
   // Data state refresh trigger
-  const [dataVersion, setDataVersion] = useState(0);
+  const [, setDataVersion] = useState(0);
   const refreshData = useCallback(() => {
     setDataVersion(v => v + 1);
   }, []);
@@ -38,6 +49,76 @@ export default function App() {
   const allOrders = db.getOrders();
   const metrics = db.getDashboardMetrics(dateRange, customStart, customEnd);
   const exceptionsCount = metrics.unmatchedOrders;
+
+  // Initialize and listen to Auth & Cloud Sync
+  useEffect(() => {
+    let unsubscribeRealtime: (() => void) | null = null;
+
+    const unsubscribeAuth = authService.onAuthStateChanged(async user => {
+      setCurrentUser(user);
+      db.setUserId(user ? user.id : null);
+      cloudSync.setUserId(user ? user.id : null);
+
+      if (user) {
+        // 1. Flush any offline pending queue for this user
+        await cloudSync.flushPendingQueue();
+
+        // 2. Pull latest cloud data
+        const cloudData = await cloudSync.pullAllFromCloud(user.id);
+        if (cloudData) {
+          db.pullCloudUpdates(cloudData);
+          refreshData();
+        }
+
+        // 3. Setup real-time listener for multi-device sync
+        if (unsubscribeRealtime) unsubscribeRealtime();
+        unsubscribeRealtime = cloudSync.subscribeToRealtime(user.id, () => {
+          refreshData();
+        });
+
+        // 4. Prompt one-time migration if legacy localStorage records exist
+        if (db.hasLegacyLocalStorageData()) {
+          setIsMigrationModalOpen(true);
+        }
+      }
+
+      refreshData();
+    });
+
+    const unsubscribeSync = cloudSync.onStatusChange((status, lastSynced) => {
+      setSyncStatus(status);
+      setLastSyncedTime(lastSynced);
+    });
+
+    return () => {
+      unsubscribeAuth();
+      unsubscribeSync();
+      if (unsubscribeRealtime) unsubscribeRealtime();
+    };
+  }, [refreshData]);
+
+  // Manual Sync Trigger
+  const handleSyncNow = async () => {
+    if (currentUser) {
+      await cloudSync.flushPendingQueue();
+      const cloudData = await cloudSync.pullAllFromCloud(currentUser.id);
+      if (cloudData) {
+        db.pullCloudUpdates(cloudData);
+        refreshData();
+      }
+    } else {
+      setIsAuthModalOpen(true);
+    }
+  };
+
+  // Logout handler
+  const handleLogout = async () => {
+    await authService.logout();
+    db.setUserId(null);
+    cloudSync.setUserId(null);
+    setCurrentUser(null);
+    refreshData();
+  };
 
   // Open Upload Modal with specific tab
   const handleOpenUpload = (tab: 'transaction' | 'handover' = 'transaction') => {
@@ -65,6 +146,12 @@ export default function App() {
         onOpenUpload={() => handleOpenUpload('transaction')}
         pendingExceptionsCount={exceptionsCount}
         onOpenExceptions={() => setCurrentTab('exceptions')}
+        currentUser={currentUser}
+        syncStatus={syncStatus}
+        lastSyncedTime={lastSyncedTime}
+        onOpenAuth={() => setIsAuthModalOpen(true)}
+        onLogout={handleLogout}
+        onSyncNow={handleSyncNow}
       />
 
       {/* Main Content Area */}
@@ -86,6 +173,10 @@ export default function App() {
             onSelectOrder={setSelectedOrder}
             onNavigateTab={tab => setCurrentTab(tab as TabType)}
             onOrdersUpdated={refreshData}
+            currentUser={currentUser}
+            syncStatus={syncStatus}
+            onOpenAuth={() => setIsAuthModalOpen(true)}
+            onSyncNow={handleSyncNow}
           />
         )}
 
@@ -143,7 +234,7 @@ export default function App() {
           setIsScannerOpen(false);
           refreshData();
         }}
-        onOrderSaved={order => {
+        onOrderSaved={_order => {
           refreshData();
         }}
         onOpenExistingOrder={order => {
@@ -199,6 +290,27 @@ export default function App() {
           refreshData();
         }}
       />
+
+      {/* Authentication Modal (Sign In, Sign Up, Forgot Password) */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => setIsAuthModalOpen(false)}
+        onSuccess={() => {
+          refreshData();
+        }}
+      />
+
+      {/* Local Storage Migration Assistant Modal */}
+      {currentUser && (
+        <MigrationModal
+          isOpen={isMigrationModalOpen}
+          userId={currentUser.id}
+          onClose={() => setIsMigrationModalOpen(false)}
+          onMigrated={() => {
+            refreshData();
+          }}
+        />
+      )}
     </div>
   );
 }

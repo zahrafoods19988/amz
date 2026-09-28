@@ -141,10 +141,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       <div className="bg-white border border-slate-200 rounded-3xl p-5 shadow-xs space-y-4">
         <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
           <Database className="w-4 h-4 text-amber-500" />
-          Backup, Export & Restore
+          Backup, Export & Restore (My Account Data)
         </h3>
         <p className="text-xs text-slate-500">
-          Save your database locally or restore from a previously exported backup file.
+          Export only your authenticated user's records as JSON, or restore into your account. User data is strictly isolated.
         </p>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -153,12 +153,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl flex items-center gap-2 border border-slate-200 transition"
           >
             <Download className="w-4 h-4 text-amber-600" />
-            <span>Export Full Backup (JSON)</span>
+            <span>Export My Data (JSON)</span>
           </button>
 
           <label className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold rounded-xl flex items-center gap-2 border border-slate-200 cursor-pointer transition">
             <Upload className="w-4 h-4 text-sky-600" />
-            <span>Restore Backup (JSON)</span>
+            <span>Import My Data (JSON)</span>
             <input
               type="file"
               accept=".json"

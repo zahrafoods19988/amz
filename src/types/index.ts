@@ -3,8 +3,36 @@ export type HandoverStatus = 'MATCHED' | 'PENDING' | 'ERROR';
 export type PaymentStatus = 'COMPLETED' | 'PENDING' | 'REFUNDED' | 'PARTIALLY_REFUNDED';
 export type OrderStatus = 'Completed' | 'Pending' | 'Returned' | 'Refunded' | 'Partially Refunded';
 
+export type SyncStatus = 'SYNCED' | 'SYNCING' | 'PENDING SYNC' | 'OFFLINE' | 'SYNC ERROR';
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  full_name?: string;
+  created_at?: string;
+}
+
+export interface UserSettings {
+  user_id: string;
+  marketplace: string;
+  currency: string;
+  auto_save_scans: boolean;
+  sound_effects: boolean;
+  updated_at?: string;
+}
+
+export interface PendingSyncItem {
+  id: string;
+  user_id: string;
+  table_name: 'orders' | 'products' | 'purchase_cost_history' | 'transactions' | 'handover_records' | 'user_settings';
+  action: 'UPSERT' | 'DELETE';
+  payload: any;
+  created_at: string;
+}
+
 export interface Order {
   id: string;
+  user_id?: string;
   order_id: string; // e.g. 402-2652435-6373954
   tracking_id: string; // e.g. ASA1278249245
   shipment_id?: string;
@@ -32,6 +60,7 @@ export interface Order {
 
 export interface ProductMaster {
   id: string;
+  user_id?: string;
   product_name: string;
   asin?: string;
   sku?: string;
@@ -45,6 +74,7 @@ export interface ProductMaster {
 
 export interface PurchaseCostHistory {
   id: string;
+  user_id?: string;
   product_id: string;
   purchase_cost: number;
   effective_date: string;
@@ -53,6 +83,7 @@ export interface PurchaseCostHistory {
 
 export interface TransactionRecord {
   id: string;
+  user_id?: string;
   order_id: string;
   transaction_id: string;
   transaction_date: string;
@@ -69,6 +100,7 @@ export interface TransactionRecord {
 
 export interface HandoverRecord {
   id: string;
+  user_id?: string;
   tracking_id: string;
   shipment_id?: string;
   fba_shipment_id?: string;
@@ -83,6 +115,7 @@ export interface HandoverRecord {
 
 export interface ScannedLabelRecord {
   id: string;
+  user_id?: string;
   order_id: string;
   tracking_id: string;
   scan_date: string;

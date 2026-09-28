@@ -15,8 +15,11 @@ import {
   X,
   CheckSquare,
   AlertOctagon,
+  Cloud,
+  RefreshCw,
+  User,
 } from 'lucide-react';
-import { DashboardMetrics, DateFilterRange, Order } from '../types';
+import { DashboardMetrics, DateFilterRange, Order, AuthUser, SyncStatus } from '../types';
 import { db } from '../services/db';
 import { sound } from '../services/sound';
 
@@ -32,6 +35,10 @@ interface DashboardViewProps {
   onSelectOrder: (order: Order) => void;
   onNavigateTab: (tab: 'orders' | 'products' | 'exceptions' | 'reports') => void;
   onOrdersUpdated?: () => void;
+  currentUser?: AuthUser | null;
+  syncStatus?: SyncStatus;
+  onOpenAuth?: () => void;
+  onSyncNow?: () => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -46,6 +53,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onSelectOrder,
   onNavigateTab,
   onOrdersUpdated,
+  currentUser,
+  syncStatus = 'SYNCED',
+  onOpenAuth,
+  onSyncNow,
 }) => {
   const [showCustomRangeInputs, setShowCustomRangeInputs] = useState(false);
   const [startDate, setStartDate] = useState(customStartDate || '');
@@ -165,6 +176,68 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <span>SCAN LABEL</span>
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* Cloud Sync & Multi-Device Status Card */}
+      <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+            currentUser
+              ? syncStatus === 'SYNCED'
+                ? 'bg-emerald-50 text-emerald-600 border border-emerald-200'
+                : syncStatus === 'PENDING SYNC'
+                ? 'bg-amber-50 text-amber-600 border border-amber-200'
+                : syncStatus === 'SYNCING'
+                ? 'bg-sky-50 text-sky-600 border border-sky-200'
+                : 'bg-slate-100 text-slate-600 border border-slate-200'
+              : 'bg-slate-100 text-slate-500 border border-slate-200'
+          }`}>
+            <Cloud className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-bold text-slate-900">Multi-Device Cloud Sync</span>
+              <span className={`px-2 py-0.5 rounded-full text-[10px] font-mono font-bold uppercase ${
+                currentUser
+                  ? syncStatus === 'SYNCED'
+                    ? 'bg-emerald-100 text-emerald-800'
+                    : syncStatus === 'PENDING SYNC'
+                    ? 'bg-amber-100 text-amber-800'
+                    : syncStatus === 'SYNCING'
+                    ? 'bg-sky-100 text-sky-800'
+                    : 'bg-slate-100 text-slate-700'
+                  : 'bg-amber-50 text-amber-700 border border-amber-200'
+              }`}>
+                {currentUser ? syncStatus : 'LOCAL STORAGE ONLY'}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              {currentUser
+                ? `Account: ${currentUser.email} • Scans and product costs sync across all phones & computers automatically.`
+                : 'Sign in to sync your scanned orders and Product Master across phones, tablets, and laptops.'}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          {currentUser ? (
+            <button
+              onClick={onSyncNow}
+              className="px-3.5 py-1.5 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-700 border border-slate-200 text-xs font-semibold flex items-center gap-1.5 transition active:scale-95"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-amber-600 ${syncStatus === 'SYNCING' ? 'animate-spin' : ''}`} />
+              <span>Sync Now</span>
+            </button>
+          ) : (
+            <button
+              onClick={onOpenAuth}
+              className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold flex items-center gap-1.5 shadow-sm transition active:scale-95"
+            >
+              <User className="w-3.5 h-3.5" />
+              <span>Enable Cloud Sync</span>
+            </button>
+          )}
         </div>
       </div>
 
