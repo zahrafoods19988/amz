@@ -1,0 +1,6 @@
+{
+  "name": "Amazon Seller Profit Tracker",
+  "description": "Professional Amazon Saudi Arabia profit tracking app with shipping label OCR, transaction CSV/XLSX import, handover PDF 3-way matching, automated product master, and real-time profit analytics.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
